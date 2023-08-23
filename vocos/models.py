@@ -3,8 +3,10 @@ from typing import Optional
 import torch
 from torch import nn
 from torch.nn.utils import weight_norm
+from torch.autograd import Variable
 
-from vocos.modules import ConvNeXtBlock, ResBlock1, AdaLayerNorm
+
+from vocos.modules import ConvNeXtBlock, ResBlock1, AdaLayerNorm, CausalConv1d
 
 
 class Backbone(nn.Module):
@@ -21,6 +23,9 @@ class Backbone(nn.Module):
                     and H denotes the model dimension.
         """
         raise NotImplementedError("Subclasses must implement the forward method.")
+
+
+        
 
 
 class VocosBackbone(Backbone):
@@ -48,7 +53,8 @@ class VocosBackbone(Backbone):
     ):
         super().__init__()
         self.input_channels = input_channels
-        self.embed = nn.Conv1d(input_channels, dim, kernel_size=7, padding=3)
+        #self.embed = nn.Conv1d(input_channels, dim, kernel_size=7, padding=3)
+        self.embed = CausalConv1d(input_channels, dim, kernel_size=7)
         self.adanorm = adanorm_num_embeddings is not None
         if adanorm_num_embeddings:
             self.norm = AdaLayerNorm(adanorm_num_embeddings, dim, eps=1e-6)
@@ -67,6 +73,7 @@ class VocosBackbone(Backbone):
             ]
         )
         self.final_layer_norm = nn.LayerNorm(dim, eps=1e-6)
+
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -86,6 +93,28 @@ class VocosBackbone(Backbone):
             x = conv_block(x, cond_embedding_id=bandwidth_id)
         x = self.final_layer_norm(x.transpose(1, 2))
         return x
+
+    def init_state(self,batch_size):
+        self.embed.init_state(batch_size)
+        for conv_block in self.convnext:
+            conv_block.dwconv.init_state(batch_size)
+
+    def stream(self,x:torch.Tensor, bandwidth_id: Optional[torch.Tensor] = None) -> torch.Tensor:
+        x = self.embed.stream(x)
+
+        if self.adanorm:
+            assert bandwidth_id is not None
+            x = self.norm(x.transpose(1, 2), cond_embedding_id=bandwidth_id)
+        else:
+            x = self.norm(x.transpose(1, 2))
+        x = x.transpose(1,2)
+        for conv_block in self.convnext:
+            x = conv_block.stream(x,cond_embedding_id=bandwidth_id)
+        x = self.final_layer_norm(x.transpose(1,2))
+        return x
+
+
+
 
 
 class VocosResNetBackbone(Backbone):

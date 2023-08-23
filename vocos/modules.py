@@ -2,7 +2,9 @@ from typing import Optional
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torch.nn.utils import weight_norm, remove_weight_norm
+from torch.autograd import Variable
 
 class CausalConv1d(torch.nn.Conv1d):
     def __init__(self,
@@ -25,9 +27,22 @@ class CausalConv1d(torch.nn.Conv1d):
             bias=bias)
         
         self.__padding = (kernel_size - 1) * dilation
+        self.kernel_size = kernel_size
+        self.in_channels = in_channels
         
     def forward(self, input):
         return super(CausalConv1d, self).forward(F.pad(input, (self.__padding, 0)))
+
+    def stream(self,input):
+        output = super(CausalConv1d,self).forward(torch.cat([self.state,input],dim=2))
+        if input.shape[2] > self.state.shape[2]:
+            self.state = input[:,:,input.shape[2]-self.state.shape[2]:] 
+        else:
+            self.state[:,:,self.state.shape[2]-input.shape[2]:] = input
+        return output
+
+    def init_state(self,batch_size):
+        self.state = Variable(torch.FloatTensor(batch_size,self.in_channels,self.kernel_size-1).zero_())
 
 
 class ConvNeXtBlock(nn.Module):
@@ -50,7 +65,10 @@ class ConvNeXtBlock(nn.Module):
         adanorm_num_embeddings: Optional[int] = None,
     ):
         super().__init__()
-        self.dwconv = nn.Conv1d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv
+        #self.dwconv = nn.Conv1d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv
+        self.dim=dim
+        self.dwconv = CausalConv1d(dim,dim,kernel_size=7, groups=dim)
+
         self.adanorm = adanorm_num_embeddings is not None
         if adanorm_num_embeddings:
             self.norm = AdaLayerNorm(adanorm_num_embeddings, dim, eps=1e-6)
@@ -64,6 +82,7 @@ class ConvNeXtBlock(nn.Module):
             if layer_scale_init_value > 0
             else None
         )
+        
 
     def forward(self, x: torch.Tensor, cond_embedding_id: Optional[torch.Tensor] = None) -> torch.Tensor:
         residual = x
@@ -83,6 +102,26 @@ class ConvNeXtBlock(nn.Module):
 
         x = residual + x
         return x
+    
+    def stream(self,x:torch.Tensor,cond_embedding_id: Optional[torch.Tensor] = None) -> torch.Tensor:
+        residual = x
+        x = self.dwconv.stream(x)
+        x = x.transpose(1, 2)  # (B, C, T) -> (B, T, C)
+        if self.adanorm:
+            assert cond_embedding_id is not None
+            x = self.norm(x, cond_embedding_id)
+        else:
+            x = self.norm(x)
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.pwconv2(x)
+        if self.gamma is not None:
+            x = self.gamma * x
+        x = x.transpose(1, 2)  # (B, T, C) -> (B, C, T)
+
+        x = residual + x
+        return x
+
 
 
 class AdaLayerNorm(nn.Module):

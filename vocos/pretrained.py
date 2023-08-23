@@ -110,6 +110,24 @@ class Vocos(nn.Module):
         x = self.backbone(features_input, **kwargs)
         audio_output = self.head(x)
         return audio_output
+    
+
+    @torch.inference_mode()
+    def decode_stream(self, features_input: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        """
+        Method to decode audio waveform from already calculated features. The features input is passed through
+        the backbone and the head to reconstruct the audio output.
+
+        Args:
+            features_input (Tensor): The input tensor of features of shape (B, C, L), where B is the batch size,
+                                     C denotes the feature dimension, and L is the sequence length.
+
+        Returns:
+            Tensor: The output tensor representing the reconstructed audio waveform of shape (B, T).
+        """
+        x = self.backbone.stream(features_input, **kwargs)
+        audio_output = self.head(x)
+        return audio_output
 
     @torch.inference_mode()
     def codes_to_features(self, codes: torch.Tensor) -> torch.Tensor:
